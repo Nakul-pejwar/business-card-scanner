@@ -10,7 +10,7 @@ python -m venv venv
 source venv/Scripts/activate  # if using Git Bash
 4. Install deps: `pip install -r requirements.txt` (New? Deps = dependencies, the libraries we lean on.)
 5. Tesseract setup: Download from [here](https://github.com/tesseract-ocr/tesseract) (free OCR engine). On Windows/Mac, installer does it; Linux: `sudo apt install tesseract-ocr` (sudo = superuser, god-mode for installs—careful, it's like handing keys to a toddler).
-5. Run: `python card_scanner.py` – Webcam pops, spacebar to snap, 'q' to save.
+5. Run: `python card_scanner.py` – Webcam pops, spacebar to snap, 'q' to save...
 
 ## What It Does
 - Live cam viewfinder (feels like your phone's camera app).
