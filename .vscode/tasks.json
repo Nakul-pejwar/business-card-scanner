@@ -1,0 +1,14 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Card Scanner",
+            "type": "shell",
+            "command": "python",
+            "args": ["card_scanner.py"],
+            "group": "build",
+            "presentation": {"echo": true, "reveal": "always", "focus": false},
+            "problemMatcher": []
+        }
+    ]
+}

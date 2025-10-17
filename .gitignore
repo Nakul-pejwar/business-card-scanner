@@ -1,0 +1,16 @@
+# Python junk
+__pycache__/
+*.pyc
+.env  # If you add secrets later
+
+# Outputs
+*.xlsx
+*.jpg
+*.png  # Sample images if you add 'em
+
+# OS noise
+.DS_Store  # Mac's fart files
+Thumbs.db  # Windows thumbs
+
+# IDE
+.vscode/settings.json  # Personal prefs—keep local

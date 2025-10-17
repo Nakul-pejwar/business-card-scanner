@@ -1,0 +1,7 @@
+{
+    "python.defaultInterpreterPath": "./venv/bin/python",  // Points to virtual env—new? venv = isolated Python world, no global pollution. Make one with `python -m venv venv` (m = module flag).
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,  // Linter: Spots bugs early, like "hey, you forgot an import."
+    "python.formatting.provider": "black",  // Auto-formats code pretty—black is a no-BS formatter.
+    "files.associations": {"*.py": "python"}  // Duh, but explicit is kind.
+}

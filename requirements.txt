@@ -1,0 +1,5 @@
+opencv-python==4.8.1.78  # Camera wizard—handles snaps and feeds
+pytesseract==0.3.10      # OCR brain—yanks text from pixels
+pandas==2.1.4            # Data cruncher—turns chaos into Excel rows
+openpyxl==3.1.2          # Excel ninja—writes .xlsx without the app
+numpy==1.24.3            # Math sidekick—quick image tweaks (bonus from our code)
