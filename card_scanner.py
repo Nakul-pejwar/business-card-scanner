@@ -1,26 +1,121 @@
-import cv2  # OpenCV: Your camera's best friend for live feeds and snaps
-import pytesseract  # OCR engine—turns pixels into words
-import pandas as pd  # Pandas: The data ninja for Excel wrangling
-import re  # Regex: Pattern hunter for emails/phones (import it, it's built-in magic)
-from datetime import datetime  # Timestamps, 'cause we love order
-import numpy as np  # NumPy: Quick math for image tweaks (also built-in)
+import cv2
+import pytesseract
+import pandas as pd
+import re
+from datetime import datetime
+import numpy as np
+import os
+from pathlib import Path
+import logging
+import threading
+from collections import defaultdict
 
-# Your Excel file—grows with each scan
-excel_file = 'contact_cards.xlsx'
+# ============================================================================
+# LOGGING SETUP - Better debugging & error tracking
+# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('card_scanner.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Regex patterns for parsing (explained below—new? Think of 'em as treasure maps for text)
-email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'  # Grabs emails like john@company.com
-phone_pattern = r'(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'  # Phones: 123-456-7890 or +1 (555) 1234
-website_pattern = r'\b(https?://)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[a-zA-Z0-9.-]*)*'  # Sites: company.com or full URLs
+# ============================================================================
+# CONFIGURATION - Centralized settings
+# ============================================================================
+CONFIG = {
+    'excel_file': 'contact_cards.xlsx',
+    'camera_id': 0,
+    'frame_width': 1280,
+    'frame_height': 720,
+    'font_scale': 0.6,
+    'font_thickness': 1,
+    'capture_delay_ms': 1500,
+    'retry_delay_ms': 1000,
+    'min_text_length': 5,
+}
+
+# Improved regex patterns
+PATTERNS = {
+    'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b',
+    'phone': r'(\+?[\d]{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
+    'website': r'https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?',
+    'address': r'\d+\s+[A-Za-z\s]+(?:St|Ave|Rd|Blvd|Dr|Lane)',
+}
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+def init_excel(filepath):
+    """Initialize Excel file with proper structure."""
+    try:
+        if os.path.exists(filepath):
+            df = pd.read_excel(filepath)
+            logger.info(f"Loaded existing Excel: {len(df)} contacts")
+        else:
+            columns = ['Timestamp', 'Name', 'Company', 'Phone', 'Email', 'Address', 'Website', 'Confidence', 'Raw_Text']
+            df = pd.DataFrame(columns=columns)
+            df.to_excel(filepath, index=False)
+            logger.info(f"Created new Excel file: {filepath}")
+        return df
+    except Exception as e:
+        logger.error(f"Excel init failed: {e}")
+        raise
 
 def extract_text_from_image(image):
-    """Grab raw text from the image—grayscale for better OCR reads."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # BGR to gray: Strips color, sharpens text edges
-    text = pytesseract.image_to_string(gray, lang='eng')  # OCR blast—'eng' for English cards
-    return text.strip()  # Trim whitespace, no fluffy extras
+    """Extract text with preprocessing for better OCR."""
+    try:
+        # Preprocessing: Grayscale + contrast enhancement
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Threshold for cleaner text
+        _, binary = cv2.threshold(enhanced, 150, 255, cv2.THRESH_BINARY)
+        
+        # OCR with better config
+        custom_config = r'--oem 3 --psm 6'
+        text = pytesseract.image_to_string(binary, lang='eng', config=custom_config)
+        
+        logger.debug(f"OCR extracted {len(text)} characters")
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Text extraction failed: {e}")
+        return ""
+
+def extract_field(raw_text, pattern_key):
+    """Safely extract field using regex."""
+    try:
+        matches = re.findall(PATTERNS[pattern_key], raw_text, re.IGNORECASE)
+        return matches[0] if matches else ''
+    except Exception as e:
+        logger.warning(f"Pattern extraction failed for {pattern_key}: {e}")
+        return ''
+
+def calculate_confidence(parsed_data):
+    """Calculate extraction confidence (0-100)."""
+    confidence = 0
+    max_score = 0
+    
+    field_weights = {'Name': 20, 'Email': 25, 'Phone': 25, 'Company': 20, 'Website': 10}
+    
+    for field, weight in field_weights.items():
+        max_score += weight
+        if parsed_data.get(field):
+            confidence += weight
+    
+    return int((confidence / max_score) * 100) if max_score > 0 else 0
 
 def parse_contact_info(raw_text):
-    """Smart parse: Hunt for fields in the messy text. Returns a dict of goodies."""
+    """Smart parsing with improved heuristics."""
+    if len(raw_text) < CONFIG['min_text_length']:
+        return None
+    
     info = {
         'Name': '',
         'Company': '',
@@ -31,103 +126,197 @@ def parse_contact_info(raw_text):
         'Raw_Text': raw_text
     }
     
-    # Emails & Phones: Easy peasy with regex—findall grabs all matches
-    emails = re.findall(email_pattern, raw_text)
-    info['Email'] = emails[0] if emails else ''  # First one's usually the main
-    
-    phones = re.findall(phone_pattern, raw_text)
-    info['Phone'] = phones[0] if phones else ''  # Same for phone
-    
-    websites = re.findall(website_pattern, raw_text)
-    info['Website'] = websites[0] if websites else ''
-    
-    # Name & Company: Hacky but works—split lines, grab likely suspects
-    lines = [line.strip() for line in raw_text.split('\n') if line.strip()]  # Clean lines
-    if lines:
-        # Assume line 1-ish is name (capitals, short), line 2-3 company (longer words)
-        info['Name'] = lines[0] if lines[0].isupper() or len(lines[0].split()) <= 3 else 'Unknown'
-        for line in lines[1:5]:  # Check next few lines for company vibes (all caps or "Inc./LLC")
-            if any(word in line.upper() for word in ['INC', 'LLC', 'CORP', 'CO']) or line.isupper():
-                info['Company'] = line
-                break
-            elif len(line.split()) >= 2 and not re.search(email_pattern, line) and not re.search(phone_pattern, line):
-                info['Company'] = line  # Fallback: Non-email/phone line
-    
-    # Address: Anything with commas/numbers that ain't phone/email
-    addr_candidates = [line for line in lines if ',' in line and not re.search(email_pattern | phone_pattern, line)]
-    info['Address'] = addr_candidates[0] if addr_candidates else ''
-    
-    return info
-
-# Setup Excel—create if new, load if exists
-try:
-    df = pd.read_excel(excel_file)
-except FileNotFoundError:
-    df = pd.DataFrame(columns=['Timestamp', 'Name', 'Company', 'Phone', 'Email', 'Address', 'Website', 'Raw_Text'])
-    df.to_excel(excel_file, index=False)
-
-# Webcam launch (0 = built-in cam; swap to 1 for USB)
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Window size—cozy, not fullscreen chaos
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-print("Camera's primed, legend! Point at a card, mash SPACEBAR to snap & extract. 'Q' to wrap and save. Let's hoard those contacts. 📸")
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Cam hiccup—plug it back in or yell at your laptop.")
-        break
-    
-    # Show live preview
-    display_frame = frame.copy()
-    cv2.putText(display_frame, "SPACE to Capture | Q to Quit", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    cv2.imshow('Card Scanner Cam', display_frame)
-    
-    key = cv2.waitKey(1) & 0xFF  # Grab key press—non-blocking, so feed stays smooth
-    
-    if key == ord(' '):  # Spacebar = SNAP! (Like old Polaroids, but digital)
-        print("Click captured—OCR grinding...")
-        raw_text = extract_text_from_image(frame)
+    try:
+        # Extract structured fields
+        info['Email'] = extract_field(raw_text, 'email')
+        info['Phone'] = extract_field(raw_text, 'phone')
+        info['Website'] = extract_field(raw_text, 'website')
+        info['Address'] = extract_field(raw_text, 'address')
         
-        if raw_text:
-            parsed = parse_contact_info(raw_text)
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Parse name & company from lines
+        lines = [line.strip() for line in raw_text.split('\n') if line.strip() and len(line.strip()) > 2]
+        
+        if lines:
+            # Name: Usually first line, short, mixed case
+            first_line = lines[0]
+            if not re.search(PATTERNS['email'], first_line) and not re.search(PATTERNS['phone'], first_line):
+                info['Name'] = first_line if len(first_line) < 50 else 'Unknown'
             
-            # New row for Excel
-            new_row = pd.DataFrame({
-                'Timestamp': [timestamp],
-                'Name': [parsed['Name']],
-                'Company': [parsed['Company']],
-                'Phone': [parsed['Phone']],
-                'Email': [parsed['Email']],
-                'Address': [parsed['Address']],
-                'Website': [parsed['Website']],
-                'Raw_Text': [parsed['Raw_Text']]
-            })
-            
-            df = pd.concat([df, new_row], ignore_index=True)
-            
-            # Flash success: Green tint on captured frame
-            green_frame = cv2.applyColorMap(frame, cv2.COLORMAP_JET)  # Jet map for that glow—new? It's a color overlay trick
-            cv2.putText(green_frame, f"Extracted: {parsed['Name']} @ {parsed['Company']}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.imshow('Success Snap!', green_frame)
-            cv2.waitKey(1500)  # Pause 1.5 secs to admire
-            
-            print(f"Parsed: Name={parsed['Name']}, Company={parsed['Company']}, Phone={parsed['Phone']}, Email={parsed['Email']}")
-        else:
-            # No text? Red flash for "try again"
-            red_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            red_frame[:, :] = [0, 100, 255]  # HSV red overlay—feels urgent
-            cv2.imshow('No Text? Retry!', red_frame)
-            cv2.waitKey(1000)
-            print("Ghost card? Angle better or light it up.")
-    
-    elif key == ord('q'):
-        break
+            # Company: Look for keywords or longer lines
+            for line in lines[1:6]:
+                upper_line = line.upper()
+                if any(keyword in upper_line for keyword in ['INC', 'LLC', 'CORP', 'CO', 'LTD', 'GROUP']):
+                    info['Company'] = line
+                    break
+                elif len(line.split()) >= 2 and not re.search(PATTERNS['email'], line):
+                    info['Company'] = line
+                    break
+        
+        logger.info(f"Parsed: {info['Name']} | {info['Email']}")
+        return info
+    except Exception as e:
+        logger.error(f"Parsing failed: {e}")
+        return None
 
-# Cleanup: Save & shut down
-df.to_excel(excel_file, index=False)
-cap.release()
-cv2.destroyAllWindows()
-print(f"Session over, champ! {len(df)} contacts in '{excel_file}'. Open it up—sort by company for that power move. If parsing missed stuff (like funky fonts), snap a sample and we'll regex-tweak it next round.")
+def is_duplicate(df, new_contact):
+    """Check for duplicate contacts."""
+    if df.empty or not new_contact['Email']:
+        return False
+    
+    existing_emails = df['Email'].str.lower().values
+    return new_contact['Email'].lower() in existing_emails
+
+def draw_ui(frame, status, message, color):
+    """Draw modern UI overlay."""
+    overlay = frame.copy()
+    h, w = frame.shape[:2]
+    
+    # Header bar
+    cv2.rectangle(overlay, (0, 0), (w, 60), color, -1)
+    cv2.putText(overlay, status, (15, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    
+    # Message bar
+    cv2.rectangle(overlay, (0, h-50), (w, h), (40, 40, 40), -1)
+    cv2.putText(overlay, message, (15, h-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 100), 1)
+    
+    # Blend overlay
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    
+    # Instruction text
+    cv2.putText(frame, "SPACE: Capture | Q: Quit | S: Settings", (15, 85), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    
+    return frame
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+def main():
+    logger.info("=== Business Card Scanner Started ===")
+    
+    # Initialize
+    df = init_excel(CONFIG['excel_file'])
+    cap = cv2.VideoCapture(CONFIG['camera_id'])
+    
+    if not cap.isOpened():
+        logger.error("Camera failed to open!")
+        print("❌ Camera error: Check connection or permissions")
+        return
+    
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG['frame_width'])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG['frame_height'])
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    logger.info("Camera initialized successfully")
+    print("\n✅ Camera Ready! | 📸 Point at card → SPACE to capture | Q to quit\n")
+    
+    capture_count = 0
+    duplicate_count = 0
+    
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning("Frame capture failed")
+                break
+            
+            # Draw live UI
+            display_frame = draw_ui(frame, "🎥 LIVE", 
+                                   f"Contacts: {len(df)} | Duplicates skipped: {duplicate_count}", 
+                                   (25, 25, 112))
+            
+            cv2.imshow('📇 Business Card Scanner', display_frame)
+            
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord(' '):  # SPACEBAR - CAPTURE
+                logger.info("Capture triggered")
+                raw_text = extract_text_from_image(frame)
+                
+                if raw_text:
+                    parsed = parse_contact_info(raw_text)
+                    
+                    if parsed:
+                        if is_duplicate(df, parsed):
+                            duplicate_count += 1
+                            logger.warning(f"Duplicate detected: {parsed['Email']}")
+                            
+                            # Red flash for duplicate
+                            dup_frame = frame.copy()
+                            dup_frame = draw_ui(dup_frame, "⚠️  DUPLICATE", 
+                                               f"Email already exists: {parsed['Email']}", 
+                                               (0, 0, 255))
+                            cv2.imshow('Duplicate Alert', dup_frame)
+                            cv2.waitKey(CONFIG['retry_delay_ms'])
+                        else:
+                            # Success - add to dataframe
+                            confidence = calculate_confidence(parsed)
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            
+                            new_row = pd.DataFrame({
+                                'Timestamp': [timestamp],
+                                'Name': [parsed['Name']],
+                                'Company': [parsed['Company']],
+                                'Phone': [parsed['Phone']],
+                                'Email': [parsed['Email']],
+                                'Address': [parsed['Address']],
+                                'Website': [parsed['Website']],
+                                'Confidence': [confidence],
+                                'Raw_Text': [parsed['Raw_Text']]
+                            })
+                            
+                            df = pd.concat([df, new_row], ignore_index=True)
+                            capture_count += 1
+                            
+                            logger.info(f"Contact added: {parsed['Name']} ({confidence}% confidence)")
+                            
+                            # Green flash for success
+                            success_frame = frame.copy()
+                            success_frame = draw_ui(success_frame, "✅ SUCCESS", 
+                                                   f"{parsed['Name']} @ {parsed['Company']} | Confidence: {confidence}%", 
+                                                   (0, 200, 0))
+                            cv2.imshow('Extraction Success', success_frame)
+                            cv2.waitKey(CONFIG['capture_delay_ms'])
+                    else:
+                        logger.warning("Parsing returned None")
+                        error_frame = draw_ui(frame, "❌ PARSE ERROR", "Could not parse contact info", (0, 0, 255))
+                        cv2.imshow('Parse Error', error_frame)
+                        cv2.waitKey(CONFIG['retry_delay_ms'])
+                else:
+                    logger.warning("No text detected in image")
+                    no_text_frame = draw_ui(frame, "❌ NO TEXT", 
+                                          "No text found. Better lighting? Check card angle.", 
+                                          (0, 165, 255))
+                    cv2.imshow('No Text Detected', no_text_frame)
+                    cv2.waitKey(CONFIG['retry_delay_ms'])
+            
+            elif key == ord('q'):  # QUIT
+                logger.info("Quit triggered by user")
+                break
+    
+    except Exception as e:
+        logger.error(f"Runtime error: {e}")
+        print(f"❌ Error: {e}")
+    
+    finally:
+        # Save & cleanup
+        try:
+            df.to_excel(CONFIG['excel_file'], index=False)
+            logger.info(f"Saved {len(df)} total contacts to {CONFIG['excel_file']}")
+        except Exception as e:
+            logger.error(f"Save failed: {e}")
+        
+        cap.release()
+        cv2.destroyAllWindows()
+        
+        print(f"\n{'='*50}")
+        print(f"✅ Session Complete!")
+        print(f"📊 Total Contacts: {len(df)}")
+        print(f"📸 New Captures: {capture_count}")
+        print(f"⚠️  Duplicates Skipped: {duplicate_count}")
+        print(f"💾 Saved to: {CONFIG['excel_file']}")
+        print(f"📋 Log file: card_scanner.log")
+        print(f"{'='*50}\n")
+
+if __name__ == "__main__":
+    main()
